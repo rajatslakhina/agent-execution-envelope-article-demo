@@ -2,7 +2,7 @@
 
 **Execution envelopes for parallel coding agents on one Mac.** A git worktree keeps each agent's code apart. It doesn't give an agent its own Simulator, temp folder, disk budget or teardown. This Swift package writes down the six things each agent should own, audits a set of agents against a shared Mac, models how fast a leaky QA script eats the disk, and checks that an agent verified the build it actually made.
 
-Article: (added after publish)
+Article: [Parallel Coding Agents Need Six Things of Their Own. A Git Worktree Gives Them One.](https://medium.com/@er.rajatlakhina/parallel-coding-agents-need-six-things-of-their-own-a-git-worktree-gives-them-one-5f3d02972ec2)
 
 <p align="center">
   <img src="Demo/Screenshots/audit-worktrees-only.png" width="260" alt="Envelope audit screen in the iOS Simulator for four agents with worktrees only: each agent owns 1 of 6 fields and the audit lists 14 findings." />
