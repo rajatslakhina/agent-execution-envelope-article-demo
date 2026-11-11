@@ -4,8 +4,9 @@
 # screenshots to Demo/Screenshots/.
 #
 # It follows its own advice: a simulator of its own (created here and deleted
-# on exit unless KEEP_SIM=1 or you pass SIM_UDID), DerivedData inside the repo
-# (./build), a temp root it deletes, and a per-build stamp it reads back.
+# on exit unless KEEP_SIM=1 or you pass SIM_UDID), DerivedData in ./build
+# (deleted on exit unless KEEP_BUILD=1), a temp root it deletes, and a
+# per-build stamp it reads back before it trusts anything it launches.
 set -euo pipefail
 
 BUNDLE_ID="com.rajatlakhina.AgentEnvelopeDemo"
@@ -18,6 +19,9 @@ UDID="${SIM_UDID:-}"
 CREATED=0
 cleanup() {
   rm -rf "$TMP_ROOT"
+  if [ "${KEEP_BUILD:-0}" != 1 ]; then
+    rm -rf build
+  fi
   if [ "$CREATED" = 1 ] && [ "${KEEP_SIM:-0}" != 1 ]; then
     xcrun simctl shutdown "$UDID" >/dev/null 2>&1 || true
     xcrun simctl delete "$UDID" >/dev/null 2>&1 || true

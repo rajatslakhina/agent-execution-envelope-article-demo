@@ -31,7 +31,8 @@ public enum Sample {
         /// Worktree, DerivedData inside it, and a simulator per agent that is
         /// deleted at teardown: the build side is handled, the disk side isn't.
         case worktreeAndSimulator
-        /// All six fields: its own APFS volume with a quota, outside Time Machine.
+        /// All six fields: its own APFS volume with a quota, outside Time
+        /// Machine, deleted with everything else when the task ends.
         case envelope
 
         public var id: String { rawValue }
@@ -73,7 +74,7 @@ public enum Sample {
                     simulator: .dedicated(udid: udid(for: index)),
                     tempRoot: mount.appending("tmp"),
                     scratch: volume,
-                    teardown: [.worktree, .derivedData, .tempRoot, .simulator]
+                    teardown: .everything
                 )
             }
         }

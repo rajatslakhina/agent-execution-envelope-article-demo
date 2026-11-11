@@ -1,6 +1,13 @@
 import XCTest
 @testable import AgentEnvelope
 
+/// Well-formed UUIDs for tests that need a simulator of their own.
+enum TestUDID {
+    static func make(_ n: Int) -> String {
+        String(format: "00000000-0000-4000-8000-%012d", n)
+    }
+}
+
 final class EnvelopePathTests: XCTestCase {
     func testNormalisesAbsoluteAndHomePaths() throws {
         XCTAssertEqual(EnvelopePath("/a/b/../c/./d")?.description, "/a/c/d")
@@ -42,9 +49,22 @@ final class EnvelopePathTests: XCTestCase {
                 for path in [e.worktree, e.derivedData, e.tempRoot].compactMap({ $0 }) {
                     XCTAssertNotEqual(path, .root, "\(setup) \(e.agent)")
                 }
+                if let udid = e.simulator.udid { XCTAssertNotNil(UUID(uuidString: udid), "\(setup) \(e.agent)") }
             }
         }
         XCTAssertNotEqual(Sample.repo, .root)
+        XCTAssertNotNil(UUID(uuidString: Sample.bootedUDID))
+    }
+
+    func testBytesNeverTrapsAndNeverRoundsAMinimumUp() {
+        XCTAssertEqual(Bytes.gb(.nan), 0)
+        XCTAssertEqual(Bytes.gb(.infinity), .max)
+        XCTAssertEqual(Bytes.gb(-.infinity), .min)
+        XCTAssertEqual(Bytes.gb(1e30), .max)
+        XCTAssertEqual(Bytes.format(Bytes.gb(550)), "550 GB")
+        XCTAssertEqual(Bytes.format(Bytes.gb(475.9)), "475.9 GB")
+        XCTAssertEqual(Bytes.format(Bytes.gb(475.99)), "475.9 GB")
+        XCTAssertEqual(Bytes.format(Bytes.gb(5.7)), "5.7 GB")
     }
 }
 
@@ -69,12 +89,34 @@ final class EnvelopeAuditTests: XCTestCase {
         XCTAssertEqual(report.count(.collision), 0)
     }
 
+    func testKeepingTheClonedSimulatorsDropsItToTwo() {
+        let kept = Sample.envelopes(.worktreeAndSimulator).map { e -> ExecutionEnvelope in
+            var e = e
+            e.teardown = [.worktree]
+            return e
+        }
+        let report = EnvelopeAudit.run(kept, on: Sample.host)
+        XCTAssertEqual(report.owned["agent-1"], [.worktree, .derivedData])
+        XCTAssertEqual(report.findings.count, 13)
+    }
+
     func testFullEnvelopeOwnsAllSixWithNoFindings() {
         let report = EnvelopeAudit.run(Sample.envelopes(.envelope), on: Sample.host)
         XCTAssertTrue(report.findings.isEmpty, "\(report.findings.map(\.detail))")
         for agent in Sample.agents {
             XCTAssertEqual(report.ownedCount(for: agent), 6)
         }
+    }
+
+    func testAVolumeThatOutlivesTheTaskIsNotOwned() {
+        let kept = Sample.envelopes(.envelope).map { e -> ExecutionEnvelope in
+            var e = e
+            e.teardown.remove(.scratchVolume)
+            return e
+        }
+        let report = EnvelopeAudit.run(kept, on: Sample.host)
+        XCTAssertEqual(report.findings.filter { $0.kind == .survivesTeardown(.scratchVolume) }.count, 4)
+        XCTAssertEqual(report.owned["agent-1"], [.worktree, .derivedData, .simulator, .tempRoot])
     }
 
     func testEveryMissingFieldHasAReason() {
@@ -96,14 +138,22 @@ final class EnvelopeAuditTests: XCTestCase {
     }
 
     func testSameUDIDIsACollision() {
+        let udid = TestUDID.make(1)
         let envelopes = [
-            ExecutionEnvelope(agent: "a", worktree: EnvelopePath("/w/a"), simulator: .dedicated(udid: "X")),
-            ExecutionEnvelope(agent: "b", worktree: EnvelopePath("/w/b"), simulator: .dedicated(udid: "X")),
+            ExecutionEnvelope(agent: "a", worktree: EnvelopePath("/w/a"), simulator: .dedicated(udid: udid)),
+            ExecutionEnvelope(agent: "b", worktree: EnvelopePath("/w/b"), simulator: .dedicated(udid: udid)),
         ]
         let report = EnvelopeAudit.run(envelopes, on: Sample.host)
         let shared = report.findings.filter { $0.kind == .sharedSimulator }
         XCTAssertEqual(shared.count, 1)
         XCTAssertEqual(shared.first?.agents, ["a", "b"])
+        XCTAssertFalse(report.owned["a"]?.contains(.simulator) ?? true)
+    }
+
+    func testNonUUIDSimulatorIsRejected() {
+        let e = ExecutionEnvelope(agent: "a", worktree: EnvelopePath("/w/a"), simulator: .dedicated(udid: "all"), teardown: [.worktree, .simulator])
+        let report = EnvelopeAudit.run([e], on: Sample.host)
+        XCTAssertTrue(report.findings.contains { $0.kind == .invalidSimulatorUDID })
         XCTAssertFalse(report.owned["a"]?.contains(.simulator) ?? true)
     }
 
@@ -128,30 +178,29 @@ final class EnvelopeAuditTests: XCTestCase {
         XCTAssertFalse(report.findings.contains { $0.kind == .overlappingPaths })
     }
 
+    private func fullEnvelope(_ i: Int, quota: Double = 100) -> ExecutionEnvelope {
+        ExecutionEnvelope(
+            agent: AgentID("agent-\(i)"),
+            worktree: EnvelopePath("/Volumes/agent-\(i)/worktree"),
+            derivedData: EnvelopePath("/Volumes/agent-\(i)/DerivedData"),
+            simulator: .dedicated(udid: TestUDID.make(i)),
+            tempRoot: EnvelopePath("/Volumes/agent-\(i)/tmp"),
+            scratch: .dedicated(name: "agent-\(i)", quotaBytes: Bytes.gb(quota), inTimeMachine: false),
+            teardown: .everything
+        )
+    }
+
     func testQuotaOvercommitIsHostLevelAndLeavesOwnershipAlone() {
-        let six = (1...6).map { i in
-            ExecutionEnvelope(
-                agent: AgentID("agent-\(i)"),
-                worktree: EnvelopePath("/Volumes/agent-\(i)/worktree"),
-                derivedData: EnvelopePath("/Volumes/agent-\(i)/DerivedData"),
-                simulator: .dedicated(udid: "SIM-\(i)"),
-                tempRoot: EnvelopePath("/Volumes/agent-\(i)/tmp"),
-                scratch: .dedicated(name: "agent-\(i)", quotaBytes: Bytes.gb(100), inTimeMachine: false),
-                teardown: [.worktree, .derivedData, .tempRoot, .simulator]
-            )
-        }
         let host = HostProfile(freeBytes: Bytes.gb(550), floorBytes: Bytes.gb(50), maxBootedSimulators: 8, timeMachineSnapshots: true)
-        let report = EnvelopeAudit.run(six, on: host)
+        let report = EnvelopeAudit.run((1...6).map { fullEnvelope($0) }, on: host)
         XCTAssertEqual(report.findings.map(\.kind), [.quotaOvercommit])
         XCTAssertEqual(report.hostFindings.count, 1)
         XCTAssertEqual(report.ownedCount(for: "agent-6"), 6)
     }
 
     func testSimulatorBudget() {
-        var five = Sample.envelopes(.envelope)
-        five.append(ExecutionEnvelope(agent: "agent-5", worktree: EnvelopePath("/Volumes/agent-5/worktree"), simulator: .dedicated(udid: "SIM-5")))
-        let report = EnvelopeAudit.run(five, on: Sample.host)
-        XCTAssertTrue(report.findings.contains { $0.kind == .simulatorBudget })
+        let report = EnvelopeAudit.run((1...5).map { fullEnvelope($0, quota: 50) }, on: Sample.host)
+        XCTAssertEqual(report.findings.map(\.kind), [.simulatorBudget])
     }
 
     func testPooledVolumeProtectsMacOSButNotTheAgents() {
@@ -162,36 +211,55 @@ final class EnvelopeAuditTests: XCTestCase {
         }
         let report = EnvelopeAudit.run(envelopes, on: Sample.host)
         XCTAssertEqual(report.findings.filter { $0.kind == .pooledQuota }.first?.agents, ["a", "b"])
+        XCTAssertFalse(report.findings.contains { $0.kind == .pooledVolumeDeleted })
         XCTAssertFalse(report.owned["a"]?.contains(.scratchVolume) ?? true)
     }
 
-    func testPathOffTheScratchVolumeIsFlagged() {
-        let e = ExecutionEnvelope(
-            agent: "a", worktree: EnvelopePath("/Volumes/a/worktree"), derivedData: EnvelopePath("~/dd/a"),
-            simulator: .dedicated(udid: "S"), tempRoot: EnvelopePath("/Volumes/a/tmp"),
-            scratch: .dedicated(name: "a", quotaBytes: Bytes.gb(50), inTimeMachine: false), teardown: .everything
-        )
+    func testDeletingAPooledVolumeIsACollision() {
+        let pooled = ScratchVolume.dedicated(name: "agents", quotaBytes: Bytes.gb(300), inTimeMachine: false)
+        let envelopes = ["a", "b"].map { name in
+            ExecutionEnvelope(agent: AgentID(name), worktree: EnvelopePath("/Volumes/agents/\(name)/w"),
+                              tempRoot: EnvelopePath("/Volumes/agents/\(name)/tmp"), scratch: pooled,
+                              teardown: name == "a" ? [.worktree, .tempRoot, .scratchVolume] : [.worktree, .tempRoot])
+        }
+        let report = EnvelopeAudit.run(envelopes, on: Sample.host)
+        let deleted = report.findings.filter { $0.kind == .pooledVolumeDeleted }
+        XCTAssertEqual(deleted.count, 1)
+        XCTAssertEqual(deleted.first?.severity, .collision)
+        XCTAssertEqual(deleted.first?.agents, ["a", "b"])
+    }
+
+    func testPathsOffTheScratchVolumeAreFlaggedIncludingTheWorktree() {
+        var e = fullEnvelope(1, quota: 50)
+        e.derivedData = EnvelopePath("~/dd/a")
+        e.worktree = EnvelopePath("~/src/App-agent-1")
         let report = EnvelopeAudit.run([e], on: Sample.host)
-        XCTAssertEqual(report.findings.map(\.kind), [.offScratchVolume(.derivedData)])
+        XCTAssertEqual(Set(report.findings.map(\.kind)), [.offScratchVolume(.derivedData), .offScratchVolume(.worktree)])
+    }
+
+    func testVolumeNameThatCannotMountIsFlagged() {
+        var e = fullEnvelope(1, quota: 50)
+        e.scratch = .dedicated(name: "a/b", quotaBytes: Bytes.gb(50), inTimeMachine: false)
+        let report = EnvelopeAudit.run([e], on: Sample.host)
+        XCTAssertTrue(report.findings.contains { $0.kind == .invalidVolumeName })
+        XCTAssertFalse(report.owned["agent-1"]?.contains(.scratchVolume) ?? true)
     }
 
     func testBackedUpVolumeIsStillSnapshotted() {
-        let e = ExecutionEnvelope(
-            agent: "a", worktree: EnvelopePath("/Volumes/a/worktree"), derivedData: EnvelopePath("/Volumes/a/dd"),
-            simulator: .dedicated(udid: "S"), tempRoot: EnvelopePath("/Volumes/a/tmp"),
-            scratch: .dedicated(name: "a", quotaBytes: Bytes.gb(50), inTimeMachine: true), teardown: .everything
-        )
+        var e = fullEnvelope(1, quota: 50)
+        e.scratch = .dedicated(name: "agent-1", quotaBytes: Bytes.gb(50), inTimeMachine: true)
         var host = Sample.host
         XCTAssertEqual(EnvelopeAudit.run([e], on: host).findings.map(\.kind), [.snapshotRetention])
         host.timeMachineSnapshots = false
         XCTAssertTrue(EnvelopeAudit.run([e], on: host).findings.isEmpty)
     }
 
-    func testDuplicateAgentIDOwnsNothing() {
+    func testDuplicateAgentIDOwnsNothingAndIdsStayUnique() {
         let e = ExecutionEnvelope(agent: "a", worktree: EnvelopePath("/w/a"))
         let report = EnvelopeAudit.run([e, e], on: Sample.host)
         XCTAssertTrue(report.findings.contains { $0.kind == .duplicateAgentID })
         XCTAssertEqual(report.ownedCount(for: "a"), 0)
+        XCTAssertEqual(Set(report.findings.map(\.id)).count, report.findings.count)
     }
 
     func testCapacityPlanIsTheTighterOfDiskAndSimulators() {

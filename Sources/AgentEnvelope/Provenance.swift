@@ -35,7 +35,8 @@ public struct LaunchCheck: Hashable, Sendable {
 }
 
 public enum Verdict: Hashable, Sendable {
-    /// The app this agent launched is the build it made, and nobody else's build looks the same.
+    /// The app this agent launched is the build it made, on a simulator no
+    /// other agent installed to.
     case verified
     /// The build succeeded, but nobody launched the app and read back what was installed.
     case notChecked
@@ -48,6 +49,10 @@ public enum Verdict: Hashable, Sendable {
     /// the same bundle with the same stamp on the same simulator, so the check
     /// can't tell whose app it is.
     case ambiguousStamp(sharedWith: [AgentID])
+    /// The installed app is this agent's build, but other agents installed on
+    /// the same simulator. Reinstalling keeps an app's data, so what the app
+    /// read at launch may have been written by their builds.
+    case sharedSimulator(with: [AgentID])
 
     /// Only `.verified` lets an agent report success.
     public var counts: Bool { self == .verified }
@@ -59,6 +64,7 @@ public enum Verdict: Hashable, Sendable {
         case .wrongSimulator: return "Wrong simulator"
         case .foreignBuild(let by): return by.map { "Tested \($0)'s build" } ?? "Tested someone else's build"
         case .ambiguousStamp(let others): return "Ambiguous: same stamp as \(others.map(\.rawValue).joined(separator: ", "))"
+        case .sharedSimulator(let others): return "Shared simulator with \(others.map(\.rawValue).joined(separator: ", "))"
         }
     }
 }
@@ -91,7 +97,13 @@ public enum ProvenanceGate {
                 continue
             }
             let lookalikes = others.filter { $0.bundleID == receipt.bundleID && $0.stamp == receipt.stamp }.map(\.agent)
-            out[agent] = lookalikes.isEmpty ? .verified : .ambiguousStamp(sharedWith: lookalikes.sorted())
+            if !lookalikes.isEmpty {
+                out[agent] = .ambiguousStamp(sharedWith: lookalikes.sorted())
+            } else if !others.isEmpty {
+                out[agent] = .sharedSimulator(with: others.map(\.agent).sorted())
+            } else {
+                out[agent] = .verified
+            }
         }
         return out
     }

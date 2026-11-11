@@ -17,27 +17,27 @@ enum LaunchOptions {
     static func string(_ key: String) -> String? { UserDefaults.standard.string(forKey: key) }
 }
 
-enum Tab: String, Hashable {
+enum DemoTab: String, Hashable {
     case audit, runway, verify, contract
 }
 
 struct RootView: View {
-    @State private var tab = Tab(rawValue: LaunchOptions.string("tab") ?? "") ?? .audit
+    @State private var tab = DemoTab(rawValue: LaunchOptions.string("tab") ?? "") ?? .audit
 
     var body: some View {
         TabView(selection: $tab) {
             AuditView()
                 .tabItem { Label("Audit", systemImage: "square.grid.3x3") }
-                .tag(Tab.audit)
+                .tag(DemoTab.audit)
             RunwayView()
                 .tabItem { Label("Runway", systemImage: "internaldrive") }
-                .tag(Tab.runway)
+                .tag(DemoTab.runway)
             VerifyView()
                 .tabItem { Label("Verify", systemImage: "checkmark.seal") }
-                .tag(Tab.verify)
+                .tag(DemoTab.verify)
             ContractView()
                 .tabItem { Label("Contract", systemImage: "doc.text") }
-                .tag(Tab.contract)
+                .tag(DemoTab.contract)
         }
     }
 }
@@ -47,30 +47,27 @@ struct RootView: View {
 struct AuditView: View {
     @State private var setup = Sample.Setup(rawValue: LaunchOptions.string("setup") ?? "") ?? .worktreesOnly
 
-    private var report: AuditReport { EnvelopeAudit.run(Sample.envelopes(setup), on: Sample.host) }
-
     var body: some View {
-        NavigationStack {
+        let report = EnvelopeAudit.run(Sample.envelopes(setup), on: Sample.host)
+        return NavigationStack {
             List {
                 Section {
                     Picker("Setup", selection: $setup) {
                         ForEach(Sample.Setup.allCases) { Text($0.title).tag($0) }
                     }
                     .pickerStyle(.segmented)
-                    summary
+                    AuditSummary(report: report)
                 }
                 Section("Who owns each field") {
                     ForEach(Field.allCases, id: \.self) { field in
                         OwnershipRow(field: field, report: report)
                     }
                 }
-                if !report.findings.isEmpty {
-                    ForEach(Finding.Severity.allCases, id: \.self) { severity in
-                        let items = report.findings.filter { $0.severity == severity }
-                        if !items.isEmpty {
-                            Section("\(severity.title) (\(items.count))") {
-                                ForEach(items) { FindingRow(finding: $0) }
-                            }
+                ForEach(Finding.Severity.allCases, id: \.self) { severity in
+                    let items = report.findings.filter { $0.severity == severity }
+                    if !items.isEmpty {
+                        Section("\(severity.title) (\(items.count))") {
+                            ForEach(items) { FindingRow(finding: $0) }
                         }
                     }
                 }
@@ -78,16 +75,19 @@ struct AuditView: View {
             .navigationTitle("Envelope audit")
         }
     }
+}
 
-    private var summary: some View {
-        let owned = Sample.agents.map { report.ownedCount(for: $0) }
-        let lowest = owned.min() ?? 0
+struct AuditSummary: View {
+    let report: AuditReport
+
+    var body: some View {
+        let lowest = Sample.agents.map { report.ownedCount(for: $0) }.min() ?? 0
         let n = report.findings.count
         return VStack(alignment: .leading, spacing: 6) {
             Text("Each agent owns \(lowest) of \(Field.allCases.count) fields")
                 .font(.title3.weight(.semibold))
             Text(n == 0
-                 ? "No findings. Four agents can share this Mac."
+                 ? "No findings. These \(Sample.agents.count) agents can share this Mac."
                  : "\(n) findings: \(report.count(.collision)) collision · \(report.count(.leak)) leak · \(report.count(.capacity)) capacity")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -141,27 +141,34 @@ struct FindingRow: View {
 
 // MARK: - Runway
 
-struct RunwaySeriesPoint: Identifiable {
-    let series: String
-    let hour: Int
-    let freeGB: Double
-    var id: String { "\(series)-\(hour)" }
-}
-
 struct RunwayRow: Identifiable {
     let policy: Sample.RunwayCase
     let result: RunwayResult
+    let color: Color
     var id: String { policy.id }
 }
 
-struct RunwayView: View {
-    private let hours = 12
-    private let rows: [RunwayRow] = Sample.runwayCases.map { RunwayRow(policy: $0, result: Sample.runway($0)) }
+struct TracePoint: Identifiable {
+    let series: String
+    let index: Int
+    let hour: Double
+    let freeGB: Double
+    var id: String { "\(series)-\(index)" }
+}
 
-    private var points: [RunwaySeriesPoint] {
+struct RunwayView: View {
+    private static let hours = 12
+    private static let palette: [Color] = [.red, .orange, .purple, .green, .blue, .teal]
+
+    private let rows: [RunwayRow] = Sample.runwayCases.enumerated().map { index, c in
+        RunwayRow(policy: c, result: Sample.runway(c, hours: RunwayView.hours),
+                  color: RunwayView.palette.indices.contains(index) ? RunwayView.palette[index] : .gray)
+    }
+
+    private var points: [TracePoint] {
         rows.flatMap { row in
-            row.result.points.map {
-                RunwaySeriesPoint(series: row.policy.title, hour: $0.hour, freeGB: Double($0.hostFreeBytes) / 1_000_000_000)
+            row.result.trace.enumerated().map { i, s in
+                TracePoint(series: row.policy.title, index: i, hour: s.hour, freeGB: Double(s.freeBytes) / 1_000_000_000)
             }
         }
     }
@@ -170,7 +177,7 @@ struct RunwayView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("4 agents · QA every 15 minutes · each run leaves a 5.7 GB fixture behind")
+                    Text("\(Sample.agents.count) agents · QA every \(60 / max(1, Sample.leak.runsPerAgentPerHour)) minutes · each run leaves \(Bytes.format(Sample.leak.bytesPerRun)) behind")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Chart {
@@ -183,27 +190,22 @@ struct RunwayView: View {
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
                             .foregroundStyle(.red)
                             .annotation(position: .top, alignment: .leading) {
-                                Text("50 GB floor").font(.caption2).foregroundStyle(.red)
+                                Text("\(Bytes.format(Sample.host.floorBytes)) floor").font(.caption2).foregroundStyle(.red)
                             }
                     }
-                    .chartForegroundStyleScale([
-                        "No envelope, 550 GB free": Color.red,
-                        "No envelope, 1.1 TB free": Color.orange,
-                        "100 GB quota, no teardown": Color.purple,
-                        "Quota + teardown each task": Color.green,
-                    ])
-                    .chartXScale(domain: 0...hours)
+                    .chartForegroundStyleScale(domain: rows.map(\.policy.title), range: rows.map(\.color))
+                    .chartXScale(domain: 0...Double(Self.hours))
                     .chartYScale(domain: 0...1_200)
                     .chartXAxisLabel("Hours")
                     .chartYAxisLabel("Free GB on the Mac")
                     .chartLegend(.hidden)
                     .frame(height: 260)
-                    .accessibilityLabel("Free disk space over twelve hours for four policies")
+                    .accessibilityLabel("Free disk space over \(Self.hours) hours for \(rows.count) policies")
                 }
                 Section("What happens") {
                     ForEach(rows) { row in
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(row.policy.title).font(.subheadline.weight(.semibold)).foregroundStyle(color(row.id))
+                            Text(row.policy.title).font(.subheadline.weight(.semibold)).foregroundStyle(row.color)
                             Text(outcome(row.result)).font(.footnote)
                         }
                     }
@@ -213,23 +215,14 @@ struct RunwayView: View {
         }
     }
 
-    private func color(_ id: String) -> Color {
-        switch id {
-        case "none": return .red
-        case "bigger-disk": return .orange
-        case "quota": return .purple
-        default: return .green
-        }
-    }
-
     private func outcome(_ r: RunwayResult) -> String {
         if let h = r.floorBreachHour {
             return "Below the floor after \(hoursText(h)) (run \(r.floorBreachRun ?? 0)). macOS, Xcode and every agent are squeezed together."
         }
         if let h = r.firstFailedHour {
-            return "Each agent stops at its own cap from \(hoursText(h)). The Mac never drops below \(Bytes.format(r.minimumFreeBytes)) free."
+            return "Each agent stops at its own cap from \(hoursText(h)). The Mac bottoms out at \(Bytes.format(r.minimumFreeBytes)) free."
         }
-        return "Steady. Free space never drops below \(Bytes.format(r.minimumFreeBytes))."
+        return "Steady. Free space bottoms out at \(Bytes.format(r.minimumFreeBytes)), just before each teardown."
     }
 
     private func hoursText(_ h: Double) -> String { String(format: "%.1f h", h) }
@@ -269,7 +262,7 @@ struct VerifyView: View {
                     }
                 }
                 Section {
-                    Text("Only Verified lets an agent report success. A green build says the code compiled, not whose app is installed.")
+                    Text("Only Verified lets an agent report success: its own stamp, read back from a simulator nobody else installed to.")
                         .font(.footnote)
                 }
             }

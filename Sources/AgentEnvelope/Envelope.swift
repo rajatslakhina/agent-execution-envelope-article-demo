@@ -49,6 +49,14 @@ public enum SimulatorBinding: Hashable, Sendable {
         if case .dedicated(let udid) = self { return udid }
         return nil
     }
+
+    /// A dedicated binding whose UDID is a real UUID. Anything else (say,
+    /// `"all"` or `"booted"`) would make `xcrun simctl` act on simulators
+    /// that aren't this agent's.
+    public var hasValidUDID: Bool {
+        guard let udid else { return false }
+        return UUID(uuidString: udid) != nil
+    }
 }
 
 /// Where an agent's high-churn data (DerivedData, temp files, unpacked fixtures) lands.
@@ -63,7 +71,9 @@ public enum ScratchVolume: Hashable, Sendable {
     /// says whether Time Machine backs it up, and so snapshots it hourly.
     case dedicated(name: String, quotaBytes: Int64, inTimeMachine: Bool)
 
-    /// Mount point of a dedicated volume.
+    /// Mount point of a dedicated volume. `nil` for the Data volume, and for
+    /// a name that can't be a single path component (empty, `.`, `..` or one
+    /// containing `/`).
     public var mountPoint: EnvelopePath? {
         guard case .dedicated(let name, _, _) = self else { return nil }
         return EnvelopePath("/Volumes")?.appending(name)
@@ -76,6 +86,9 @@ public enum ScratchVolume: Hashable, Sendable {
 }
 
 /// What the harness deletes when the agent's task ends, whatever the agent did.
+///
+/// The teardown field is owned when it covers everything the agent was
+/// given: nothing the agent created outlives the task.
 public struct Teardown: OptionSet, Hashable, Sendable {
     public let rawValue: Int
     public init(rawValue: Int) { self.rawValue = rawValue }
@@ -176,11 +189,22 @@ public struct HostProfile: Hashable, Sendable {
 
 /// Decimal units, the way disk sizes are sold.
 public enum Bytes {
-    public static func gb(_ value: Double) -> Int64 { Int64((value * 1_000_000_000).rounded()) }
+    /// Gigabytes to bytes, rounded to the nearest byte. NaN becomes 0 and
+    /// anything outside `Int64`'s range is clamped, so this never traps.
+    public static func gb(_ value: Double) -> Int64 {
+        let bytes = (value * 1_000_000_000).rounded()
+        guard !bytes.isNaN else { return 0 }
+        let twoToThe63 = 9_223_372_036_854_775_808.0 // the first Double past Int64.max
+        if bytes >= twoToThe63 { return .max }
+        if bytes < -twoToThe63 { return .min }
+        return Int64(exactly: bytes) ?? 0
+    }
 
+    /// "550 GB", "475.9 GB". Whole numbers drop the decimal; everything else
+    /// keeps one, so a minimum like 475.9 GB is never rounded up to 476.
     public static func format(_ bytes: Int64) -> String {
-        let value = Double(bytes) / 1_000_000_000
-        if abs(value) >= 100 { return String(format: "%.0f GB", value) }
-        return String(format: "%.1f GB", value)
+        let tenths = (Double(bytes) / 100_000_000).rounded(.down) / 10
+        if tenths == tenths.rounded() { return String(format: "%.0f GB", tenths) }
+        return String(format: "%.1f GB", tenths)
     }
 }

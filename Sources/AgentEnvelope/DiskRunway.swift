@@ -18,7 +18,7 @@ public struct DiskPolicy: Hashable, Sendable {
     /// Each agent writes to its own volume with this cap. `nil`: everything
     /// lands on the Data volume with no cap.
     public var perAgentQuotaBytes: Int64?
-    /// The harness deletes the agent's temp root after this many runs (one
+    /// The harness deletes the agent's leftovers after this many runs (one
     /// task), whatever the agent's scripts did. `nil`: nothing is deleted.
     public var teardownEveryRuns: Int?
 
@@ -40,9 +40,21 @@ public struct RunwayPoint: Hashable, Sendable, Identifiable {
     public var id: Int { hour }
 }
 
+/// Free space right after one run, or right after a teardown.
+public struct RunwaySample: Hashable, Sendable {
+    /// The run, counted across all agents from 1. 0 is the starting state.
+    public let run: Int
+    /// `run` divided by runs per hour across all agents.
+    public let hour: Double
+    public let freeBytes: Int64
+}
+
 public struct RunwayResult: Hashable, Sendable {
     /// Hour 0 (before any run) to the last simulated hour.
     public let points: [RunwayPoint]
+    /// Every run, plus a second sample at the same moment whenever a teardown
+    /// frees space. This is what shows the dips inside each hour.
+    public let trace: [RunwaySample]
     /// The run, counted across all agents from 1, after which free space first
     /// fell below the floor. 0 if it started below. `nil` if it never did.
     public let floorBreachRun: Int?
@@ -59,10 +71,11 @@ public struct RunwayResult: Hashable, Sendable {
 
 /// Projects free disk space while parallel agents run a leaky QA workflow.
 ///
-/// Runs are interleaved across agents (agent 1, 2, 3, 4, 1, 2, ...). The model
-/// counts only what runs leave behind. It ignores Time Machine snapshot
-/// retention, which is why the envelope puts scratch data on a volume that
-/// isn't snapshotted.
+/// Runs are interleaved across agents (agent 1, 2, 3, 4, 1, 2, ...). A run
+/// that doesn't fit writes until its volume (or the disk) is full and then
+/// fails, the way an unpack does when it hits a quota. The model counts only
+/// what runs leave behind. It ignores Time Machine snapshot retention, which
+/// is why the envelope puts scratch data on a volume that isn't snapshotted.
 public enum DiskRunway {
     /// The first run after which `freeBytes - n * bytesPerRun` is below
     /// `floorBytes`. 0 if free space already starts below the floor; `nil` if
@@ -88,13 +101,16 @@ public enum DiskRunway {
         var held = Array(repeating: Int64(0), count: agentCount)
         var runsInTask = Array(repeating: 0, count: agentCount)
         var stuck = Array(repeating: false, count: agentCount)
-        var free = host.freeBytes
+        var free = max(0, host.freeBytes)
         var minimumFree = free
         var points = [RunwayPoint(hour: 0, hostFreeBytes: free, agentsOutOfSpace: 0)]
+        var trace = [RunwaySample(run: 0, hour: 0, freeBytes: free)]
         var breach: Int? = free < host.floorBytes ? 0 : nil
         var firstFailed: Int?
         var run = 0, completed = 0, failed = 0
 
+        func hoursFor(_ run: Int) -> Double { perHour > 0 ? Double(run) / Double(perHour) : 0 }
+        func record() { trace.append(RunwaySample(run: run, hour: hoursFor(run), freeBytes: free)) }
         func release(_ i: Int) {
             free += held[i]
             held[i] = 0
@@ -108,26 +124,36 @@ public enum DiskRunway {
                     let i = slot % agentCount
                     if stuck[i] {
                         failed += 1
+                        record()
                         continue
                     }
-                    let fitsQuota = policy.perAgentQuotaBytes.map { held[i] + bytes <= $0 } ?? true
-                    let fitsDisk = free - bytes >= 0
-                    guard fitsQuota, fitsDisk else {
-                        failed += 1
-                        if firstFailed == nil { firstFailed = run }
-                        // The task fails. With a teardown, the harness deletes
-                        // its leftovers and the agent can start again; without
-                        // one, nothing will ever free the space.
-                        if teardownEvery != nil { release(i) } else { stuck[i] = true }
-                        continue
-                    }
-                    held[i] += bytes
-                    free -= bytes
-                    completed += 1
+                    let quotaRoom = policy.perAgentQuotaBytes.map { max(0, $0 - held[i]) } ?? .max
+                    let room = min(quotaRoom, free)
+                    let written = min(bytes, room)
+                    held[i] += written
+                    free -= written
                     minimumFree = min(minimumFree, free)
                     if breach == nil, free < host.floorBytes { breach = run }
+                    record()
+                    guard written == bytes else {
+                        // Out of space part-way through: the run fails and its
+                        // partial output stays until something deletes it.
+                        failed += 1
+                        if firstFailed == nil { firstFailed = run }
+                        if teardownEvery != nil {
+                            release(i)
+                            record()
+                        } else {
+                            stuck[i] = true
+                        }
+                        continue
+                    }
+                    completed += 1
                     runsInTask[i] += 1
-                    if let n = teardownEvery, runsInTask[i] >= n { release(i) }
+                    if let n = teardownEvery, runsInTask[i] >= n {
+                        release(i)
+                        record()
+                    }
                 }
                 points.append(RunwayPoint(hour: hour, hostFreeBytes: free, agentsOutOfSpace: stuck.filter { $0 }.count))
             }
@@ -137,17 +163,13 @@ public enum DiskRunway {
             }
         }
 
-        func hoursFor(_ run: Int?) -> Double? {
-            guard let run, perHour > 0 else { return run == 0 ? 0 : nil }
-            return Double(run) / Double(perHour)
-        }
-
         return RunwayResult(
             points: points,
+            trace: trace,
             floorBreachRun: breach,
-            floorBreachHour: hoursFor(breach),
+            floorBreachHour: breach.map(hoursFor),
             firstFailedRun: firstFailed,
-            firstFailedHour: hoursFor(firstFailed),
+            firstFailedHour: firstFailed.map(hoursFor),
             minimumFreeBytes: minimumFree,
             completedRuns: completed,
             failedRuns: failed
