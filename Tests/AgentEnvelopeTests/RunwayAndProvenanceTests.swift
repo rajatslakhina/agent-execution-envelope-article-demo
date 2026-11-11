@@ -81,25 +81,51 @@ final class DiskRunwayTests: XCTestCase {
         XCTAssertEqual(r.completedRuns, 0)
     }
 
-    /// Writes every runway case's trace as JSON when RUNWAY_TRACE_OUT is set,
-    /// so the article's chart (docs/make_runway_chart.py) is drawn from this
-    /// model and not a copy of it. A no-op in normal test runs.
-    func testExportRunwayTraceWhenAsked() throws {
-        guard let out = ProcessInfo.processInfo.environment["RUNWAY_TRACE_OUT"], !out.isEmpty else { return }
-        struct Series: Encodable {
-            let id: String, title: String
-            let floorBreachHour: Double?, firstFailedHour: Double?, minimumFreeGB: Double
-            let hours: [Double], freeGB: [Double]
-        }
-        let series = Sample.runwayCases.map { c -> Series in
+    struct TraceSeries: Codable, Equatable {
+        let id: String, title: String
+        let floorBreachHour: Double?, firstFailedHour: Double?, minimumFreeGB: Double
+        let hours: [Double], freeGB: [Double]
+    }
+
+    static func currentTrace() -> [TraceSeries] {
+        Sample.runwayCases.map { c in
             let r = Sample.runway(c)
-            return Series(id: c.id, title: c.title, floorBreachHour: r.floorBreachHour, firstFailedHour: r.firstFailedHour,
-                          minimumFreeGB: Double(r.minimumFreeBytes) / 1e9,
-                          hours: r.trace.map(\.hour), freeGB: r.trace.map { Double($0.freeBytes) / 1e9 })
+            return TraceSeries(id: c.id, title: c.title, floorBreachHour: r.floorBreachHour, firstFailedHour: r.firstFailedHour,
+                               minimumFreeGB: Double(r.minimumFreeBytes) / 1e9,
+                               hours: r.trace.map(\.hour), freeGB: r.trace.map { Double($0.freeBytes) / 1e9 })
         }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(series).write(to: URL(fileURLWithPath: out))
+    }
+
+    /// Golden test for the article's chart: docs/runway-trace.json must be
+    /// exactly what DiskRunway produces today, so the chart can't drift from
+    /// the model. Set RUNWAY_TRACE_OUT to a path to rewrite the file instead.
+    func testRunwayTraceMatchesTheCommittedChartData() throws {
+        let current = Self.currentTrace()
+        if let out = ProcessInfo.processInfo.environment["RUNWAY_TRACE_OUT"], !out.isEmpty {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(current).write(to: URL(fileURLWithPath: out))
+            return
+        }
+        let golden = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("docs/runway-trace.json")
+        let committed = try JSONDecoder().decode([TraceSeries].self, from: Data(contentsOf: golden))
+        XCTAssertEqual(committed.map(\.id), current.map(\.id))
+        XCTAssertEqual(committed, current, "docs/runway-trace.json is stale: regenerate it (see README)")
+    }
+
+    func testExtremeInputsNeitherTrapNorRunAway() {
+        let host = HostProfile(freeBytes: .max, floorBytes: .min, maxBootedSimulators: .max, timeMachineSnapshots: true)
+        XCTAssertEqual(host.headroomBytes, .max)
+        XCTAssertEqual(HostProfile(freeBytes: .min, floorBytes: .max, maxBootedSimulators: 0, timeMachineSnapshots: false).headroomBytes, 0)
+        XCTAssertEqual(DiskRunway.floorBreachRun(freeBytes: .max, floorBytes: 0, bytesPerRun: 1), .max)
+        XCTAssertEqual(DiskRunway.floorBreachRun(freeBytes: .max, floorBytes: .min, bytesPerRun: 1), .max)
+        let leak = LeakProfile(bytesPerRun: .max, runsPerAgentPerHour: .max)
+        let r = DiskRunway.simulate(host: host, agents: .max, leak: leak, policy: DiskPolicy(perAgentQuotaBytes: .min, teardownEveryRuns: .min), hours: .max)
+        XCTAssertEqual(r.completedRuns + r.failedRuns, DiskRunway.maxRuns)
+        XCTAssertEqual(r.completedRuns, 0, "a negative quota is treated as zero")
+        XCTAssertEqual(CapacityPlan.maxParallelAgents(on: host, quotaPerAgent: 1), .max)
     }
 }
 
@@ -150,6 +176,17 @@ final class ProvenanceGateTests: XCTestCase {
         XCTAssertEqual(ProvenanceGate.verdicts(receipts: receipts, checks: checks)["a"], .verified)
     }
 
+    func testUDIDCaseDoesNotMatter() {
+        let receipt = BuildReceipt(agent: "a", bundleID: "x", stamp: "7", simulatorUDID: "11111111-1111-4111-8111-111111111111")
+        let check = LaunchCheck(agent: "a", simulatorUDID: "11111111-1111-4111-8111-111111111111".lowercased(), bundleID: "x", installedStamp: "7")
+        XCTAssertEqual(ProvenanceGate.verdicts(receipts: [receipt], checks: [check])["a"], .verified)
+        let upper = "ABCDEF00-1111-4111-8111-111111111111"
+        let shared = [BuildReceipt(agent: "a", bundleID: "x", stamp: "7", simulatorUDID: upper),
+                      BuildReceipt(agent: "b", bundleID: "x", stamp: "8", simulatorUDID: upper.lowercased())]
+        let checkA = LaunchCheck(agent: "a", simulatorUDID: upper, bundleID: "x", installedStamp: "7")
+        XCTAssertEqual(ProvenanceGate.verdicts(receipts: shared, checks: [checkA])["a"], .sharedSimulator(with: ["b"]))
+    }
+
     func testUnknownInstalledBuildHasNoOwner() {
         let receipt = BuildReceipt(agent: "a", bundleID: "x", stamp: "7", simulatorUDID: "S")
         let check = LaunchCheck(agent: "a", simulatorUDID: "S", bundleID: "x", installedStamp: "999")
@@ -190,6 +227,7 @@ final class EnvelopeContractTests: XCTestCase {
     func testTeardownDeletesTheWholeVolume() throws {
         let commands = try EnvelopeContract.teardownCommands(for: envelope(1), repo: Sample.repo)
         XCTAssertEqual(commands, [
+            "xcrun simctl shutdown '22222222-2222-4222-8222-222222222222' 2>/dev/null || true",
             "xcrun simctl delete '22222222-2222-4222-8222-222222222222'",
             "git -C \"$HOME\"'/src/App' worktree remove --force '/Volumes/agent-2/worktree'",
             "diskutil apfs deleteVolume '/Volumes/agent-2'",
@@ -200,6 +238,7 @@ final class EnvelopeContractTests: XCTestCase {
         var e = try envelope(1)
         e.teardown.remove(.scratchVolume)
         XCTAssertEqual(try EnvelopeContract.teardownCommands(for: e, repo: Sample.repo), [
+            "xcrun simctl shutdown '22222222-2222-4222-8222-222222222222' 2>/dev/null || true",
             "xcrun simctl delete '22222222-2222-4222-8222-222222222222'",
             "git -C \"$HOME\"'/src/App' worktree remove --force '/Volumes/agent-2/worktree'",
             "rm -rf '/Volumes/agent-2/DerivedData'",
@@ -224,9 +263,25 @@ final class EnvelopeContractTests: XCTestCase {
             let e = ExecutionEnvelope(agent: "a", tempRoot: EnvelopePath(raw), teardown: [.tempRoot])
             XCTAssertThrowsError(try EnvelopeContract.teardownCommands(for: e, repo: Sample.repo, agentsRoot: EnvelopePath("~/agents")), raw)
         }
+        // A root that isn't sane allows nothing, whatever its letter case.
+        for (root, path) in [("/users/me", "/users/me/Documents"), ("/users/me/documents", "/users/me/documents/x"),
+                             ("~/library", "~/library/caches"), ("~/.ssh", "~/.ssh/keys"), ("/library/agents", "/library/agents/a")] {
+            let e = ExecutionEnvelope(agent: "a", tempRoot: EnvelopePath(path), teardown: [.tempRoot])
+            XCTAssertThrowsError(try EnvelopeContract.teardownCommands(for: e, repo: Sample.repo, agentsRoot: EnvelopePath(root)), "\(root) \(path)")
+        }
         let systemVolume = ExecutionEnvelope(agent: "a", tempRoot: EnvelopePath("/Volumes/Macintosh HD/tmp"),
                                              scratch: .dedicated(name: "Macintosh HD", quotaBytes: 1, inTimeMachine: false), teardown: [.tempRoot, .scratchVolume])
         XCTAssertThrowsError(try EnvelopeContract.teardownCommands(for: systemVolume, repo: Sample.repo))
+    }
+
+    func testNeverDeletesAPathThatOverlapsTheRepo() throws {
+        let root = EnvelopePath("~/src")
+        for raw in ["~/src/App", "~/src/App/tmp"] {
+            let e = ExecutionEnvelope(agent: "a", tempRoot: EnvelopePath(raw), teardown: [.tempRoot])
+            XCTAssertThrowsError(try EnvelopeContract.teardownCommands(for: e, repo: Sample.repo, agentsRoot: root), raw)
+        }
+        let sibling = ExecutionEnvelope(agent: "a", tempRoot: EnvelopePath("~/src/agent-a-tmp"), teardown: [.tempRoot])
+        XCTAssertEqual(try EnvelopeContract.teardownCommands(for: sibling, repo: Sample.repo, agentsRoot: root), ["rm -rf \"$HOME\"'/src/agent-a-tmp'"])
     }
 
     func testAllowsDeletesInsideTheAgentsRoot() throws {
@@ -234,10 +289,11 @@ final class EnvelopeContractTests: XCTestCase {
         XCTAssertEqual(try EnvelopeContract.teardownCommands(for: e, repo: Sample.repo, agentsRoot: EnvelopePath("~/agents")),
                        ["rm -rf \"$HOME\"'/agents/a/tmp'"])
         XCTAssertThrowsError(try EnvelopeContract.teardownCommands(for: e, repo: Sample.repo), "no agents root, no rm -rf")
-        for root in ["~", "~/Library", "/Users/me", "/tmp/agents", "/Volumes/Macintosh HD/agents"] {
+        for root in ["~", "~/Library", "~/library", "~/.ssh", "/Users/me", "/users/me/Documents", "/tmp/agents",
+                     "/Library/agents", "/library/agents", "/Volumes/Macintosh HD/agents", "/Volumes/agents"] {
             XCTAssertFalse(EnvelopeContract.isSaneAgentsRoot(try XCTUnwrap(EnvelopePath(root))), root)
         }
-        for root in ["~/agents", "~/Developer/agents", "/Users/me/agents", "/Volumes/agents"] {
+        for root in ["~/agents", "~/Developer/agents", "/Users/me/agents", "/Volumes/agents/envelopes"] {
             XCTAssertTrue(EnvelopeContract.isSaneAgentsRoot(try XCTUnwrap(EnvelopePath(root))), root)
         }
     }

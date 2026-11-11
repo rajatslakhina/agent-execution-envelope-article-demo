@@ -42,7 +42,8 @@ public enum Field: String, CaseIterable, Sendable, Comparable {
 public enum SimulatorBinding: Hashable, Sendable {
     /// The task names no simulator, so the agent uses whichever one is already booted.
     case whateverIsBooted
-    /// A simulator created for this agent. Its UDID goes into every build and test command.
+    /// A simulator created for this agent and named by UDID wherever the agent
+    /// builds, installs or launches.
     case dedicated(udid: String)
 
     public var udid: String? {
@@ -53,9 +54,25 @@ public enum SimulatorBinding: Hashable, Sendable {
     /// A dedicated binding whose UDID is a real UUID. Anything else (say,
     /// `"all"` or `"booted"`) would make `xcrun simctl` act on simulators
     /// that aren't this agent's.
-    public var hasValidUDID: Bool {
-        guard let udid else { return false }
-        return UUID(uuidString: udid) != nil
+    public var hasValidUDID: Bool { normalizedUDID != nil }
+
+    /// The UDID in canonical upper-case form, or `nil` if it isn't a UUID.
+    /// `simctl` accepts either case, so comparisons go through this.
+    public var normalizedUDID: String? {
+        udid.flatMap(UDID.normalized)
+    }
+}
+
+enum UDID {
+    /// Canonical upper-case form of a UUID string, or `nil` if it isn't one.
+    static func normalized(_ raw: String) -> String? {
+        UUID(uuidString: raw)?.uuidString
+    }
+
+    /// The canonical form when there is one, otherwise the string as given,
+    /// so two spellings of the same simulator compare equal.
+    static func key(_ raw: String) -> String {
+        normalized(raw) ?? raw
     }
 }
 
@@ -74,6 +91,11 @@ public enum ScratchVolume: Hashable, Sendable {
     /// Mount point of a dedicated volume. `nil` for the Data volume, and for
     /// a name that can't be a single path component (empty, `.`, `..` or one
     /// containing `/`).
+    ///
+    /// This assumes the name is free. If a stale volume already has it, macOS
+    /// mounts the new one as `/Volumes/<name> 1`, so a harness should check
+    /// the mount point (or keep the UUID `addVolume` prints) before handing
+    /// the envelope to an agent.
     public var mountPoint: EnvelopePath? {
         guard case .dedicated(let name, _, _) = self else { return nil }
         return EnvelopePath("/Volumes")?.appending(name)
@@ -87,8 +109,9 @@ public enum ScratchVolume: Hashable, Sendable {
 
 /// What the harness deletes when the agent's task ends, whatever the agent did.
 ///
-/// The teardown field is owned when it covers everything the agent was
-/// given: nothing the agent created outlives the task.
+/// The teardown field is owned when nothing the agent writes outlives the
+/// task: no field falls back to a shared default (the user's `$TMPDIR`,
+/// Xcode's default DerivedData), and the harness deletes the rest.
 public struct Teardown: OptionSet, Hashable, Sendable {
     public let rawValue: Int
     public init(rawValue: Int) { self.rawValue = rawValue }
@@ -183,8 +206,13 @@ public struct HostProfile: Hashable, Sendable {
         self.timeMachineSnapshots = timeMachineSnapshots
     }
 
-    /// Bytes the agents can use before macOS is squeezed. Never negative.
-    public var headroomBytes: Int64 { max(0, freeBytes - floorBytes) }
+    /// Bytes the agents can use before macOS is squeezed. Never negative,
+    /// and saturates instead of overflowing on extreme inputs.
+    public var headroomBytes: Int64 {
+        let (difference, overflow) = freeBytes.subtractingReportingOverflow(floorBytes)
+        if overflow { return floorBytes < 0 ? .max : 0 }
+        return max(0, difference)
+    }
 }
 
 /// Decimal units, the way disk sizes are sold.

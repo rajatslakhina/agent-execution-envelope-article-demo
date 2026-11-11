@@ -76,14 +76,24 @@ public struct RunwayResult: Hashable, Sendable {
 /// fails, the way an unpack does when it hits a quota. The model counts only
 /// what runs leave behind. It ignores Time Machine snapshot retention, which
 /// is why the envelope puts scratch data on a volume that isn't snapshotted.
+///
+/// Inputs are clamped rather than trusted: agents and runs per hour to
+/// 0...1,000, and a simulation stops after `maxRuns` (100,000) runs, so no input can
+/// overflow or run away.
 public enum DiskRunway {
+    public static let maxAgents = 1_000
+    public static let maxRunsPerAgentPerHour = 1_000
+    public static let maxRuns = 100_000
+
     /// The first run after which `freeBytes - n * bytesPerRun` is below
     /// `floorBytes`. 0 if free space already starts below the floor; `nil` if
     /// runs leave nothing behind.
     public static func floorBreachRun(freeBytes: Int64, floorBytes: Int64, bytesPerRun: Int64) -> Int? {
         guard freeBytes >= floorBytes else { return 0 }
         guard bytesPerRun > 0 else { return nil }
-        return Int(clamping: (freeBytes - floorBytes) / bytesPerRun) + 1
+        let (headroom, overflow) = freeBytes.subtractingReportingOverflow(floorBytes)
+        let runs = overflow ? Int.max : Int(clamping: headroom / bytesPerRun)
+        return runs == .max ? .max : runs + 1
     }
 
     public static func simulate(
@@ -93,9 +103,12 @@ public enum DiskRunway {
         policy: DiskPolicy,
         hours: Int
     ) -> RunwayResult {
-        let agentCount = max(0, agents)
-        let perHour = agentCount * max(0, leak.runsPerAgentPerHour)
+        let agentCount = min(max(0, agents), maxAgents)
+        let perHour = agentCount * min(max(0, leak.runsPerAgentPerHour), maxRunsPerAgentPerHour)
+        let hourLimit = perHour > 0 ? (maxRuns + perHour - 1) / perHour : maxRuns
+        let simulatedHours = min(max(0, hours), hourLimit)
         let bytes = max(0, leak.bytesPerRun)
+        let quota = policy.perAgentQuotaBytes.map { max(0, $0) }
         let teardownEvery = policy.teardownEveryRuns.map { max(1, $0) }
 
         var held = Array(repeating: Int64(0), count: agentCount)
@@ -117,9 +130,10 @@ public enum DiskRunway {
             runsInTask[i] = 0
         }
 
-        if perHour > 0, hours > 0 {
-            for hour in 1...hours {
+        if perHour > 0, simulatedHours > 0 {
+            for hour in 1...simulatedHours {
                 for slot in 0..<perHour {
+                    guard run < maxRuns else { break }
                     run += 1
                     let i = slot % agentCount
                     if stuck[i] {
@@ -127,7 +141,7 @@ public enum DiskRunway {
                         record()
                         continue
                     }
-                    let quotaRoom = policy.perAgentQuotaBytes.map { max(0, $0 - held[i]) } ?? .max
+                    let quotaRoom = quota.map { max(0, $0 - held[i]) } ?? .max
                     let room = min(quotaRoom, free)
                     let written = min(bytes, room)
                     held[i] += written
@@ -157,8 +171,8 @@ public enum DiskRunway {
                 }
                 points.append(RunwayPoint(hour: hour, hostFreeBytes: free, agentsOutOfSpace: stuck.filter { $0 }.count))
             }
-        } else if hours > 0 {
-            for hour in 1...hours {
+        } else if simulatedHours > 0 {
+            for hour in 1...simulatedHours {
                 points.append(RunwayPoint(hour: hour, hostFreeBytes: free, agentsOutOfSpace: 0))
             }
         }

@@ -5,14 +5,21 @@
 #
 # It follows its own advice: a simulator of its own (created here and deleted
 # on exit unless KEEP_SIM=1 or you pass SIM_UDID), DerivedData in ./build
-# (deleted on exit unless KEEP_BUILD=1), a temp root it deletes, and a
-# per-build stamp it reads back before it trusts anything it launches.
+# (deleted on exit unless KEEP_BUILD=1), TMPDIR pointed at a temp root it
+# deletes, and a per-build stamp it reads back before it trusts any launch.
 set -euo pipefail
 
+# Work from the repo root whatever directory this was started from, so the
+# build folder it creates (and deletes) is always this repo's.
+cd "$(dirname "$0")/.."
+REPO_ROOT="$PWD"
+BUILD_DIR="$REPO_ROOT/build"
+OUT="$REPO_ROOT/Demo/Screenshots"
+
 BUNDLE_ID="com.rajatlakhina.AgentEnvelopeDemo"
-OUT="Demo/Screenshots"
 STAMP="${BUILD_STAMP:-$(date +%s)}"
 TMP_ROOT="$(mktemp -d)"
+export TMPDIR="$TMP_ROOT/"
 mkdir -p "$OUT"
 
 UDID="${SIM_UDID:-}"
@@ -20,7 +27,7 @@ CREATED=0
 cleanup() {
   rm -rf "$TMP_ROOT"
   if [ "${KEEP_BUILD:-0}" != 1 ]; then
-    rm -rf build
+    rm -rf "$BUILD_DIR"
   fi
   if [ "$CREATED" = 1 ] && [ "${KEEP_SIM:-0}" != 1 ]; then
     xcrun simctl shutdown "$UDID" >/dev/null 2>&1 || true
@@ -30,13 +37,19 @@ cleanup() {
 trap cleanup EXIT
 
 if [ -z "$UDID" ]; then
-  PICK=$(xcrun simctl list -j runtimes | python3 -c '
-import json, sys
+  # The newest installed iOS runtime this Xcode's simulator SDK can target.
+  SDK_VERSION="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+  PICK=$(xcrun simctl list -j runtimes | SDK_VERSION="$SDK_VERSION" python3 -c '
+import json, os, sys
+def version(text):
+    return [int(part) for part in text.split(".") if part.isdigit()]
+sdk = version(os.environ["SDK_VERSION"])
 runtimes = [r for r in json.load(sys.stdin)["runtimes"]
-            if r.get("isAvailable") and r.get("platform", "iOS") == "iOS" and ".iOS-" in r["identifier"]]
-runtimes.sort(key=lambda r: [int(x) for x in r["version"].split(".")])
+            if r.get("isAvailable") and r.get("platform", "iOS") == "iOS" and ".iOS-" in r["identifier"]
+            and version(r["version"])[:2] <= sdk[:2]]
+runtimes.sort(key=lambda r: version(r["version"]))
 if not runtimes:
-    sys.exit("no available iOS runtime")
+    sys.exit("no available iOS runtime at or below the iOS Simulator SDK " + os.environ["SDK_VERSION"])
 rt = runtimes[-1]
 types = [t for t in rt.get("supportedDeviceTypes", []) if t["name"].startswith("iPhone") and t["name"].endswith("Pro")]
 if not types:
@@ -54,11 +67,12 @@ xcrun simctl boot "$UDID" 2>/dev/null || true
 xcrun simctl bootstatus "$UDID" -b
 xcrun simctl ui "$UDID" appearance light || true
 
+# Build for the generic simulator platform, then install on this run's own device.
 xcodebuild -project Demo.xcodeproj -scheme Demo -configuration Debug \
-  -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath build \
+  -destination "generic/platform=iOS Simulator" -derivedDataPath "$BUILD_DIR" \
   CURRENT_PROJECT_VERSION="$STAMP" CODE_SIGNING_ALLOWED=NO build
 
-APP="build/Build/Products/Debug-iphonesimulator/Demo.app"
+APP="$BUILD_DIR/Build/Products/Debug-iphonesimulator/Demo.app"
 xcrun simctl install "$UDID" "$APP"
 
 # Verify against the artifact we built, not against whatever is installed.

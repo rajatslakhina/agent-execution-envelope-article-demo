@@ -86,11 +86,13 @@ public enum ProvenanceGate {
                 out[agent] = .notChecked
                 continue
             }
-            guard check.simulatorUDID == receipt.simulatorUDID else {
+            // simctl accepts a UDID in either case, so compare canonical forms.
+            let simulator = UDID.key(receipt.simulatorUDID)
+            guard UDID.key(check.simulatorUDID) == simulator else {
                 out[agent] = .wrongSimulator(expected: receipt.simulatorUDID, actual: check.simulatorUDID)
                 continue
             }
-            let others = lastReceipt.values.filter { $0.agent != agent && $0.simulatorUDID == check.simulatorUDID }
+            let others = lastReceipt.values.filter { $0.agent != agent && UDID.key($0.simulatorUDID) == simulator }
             guard check.bundleID == receipt.bundleID, check.installedStamp == receipt.stamp else {
                 let owners = others.filter { $0.bundleID == check.bundleID && $0.stamp == check.installedStamp }.map(\.agent)
                 out[agent] = .foreignBuild(installedBy: owners.count == 1 ? owners.first : nil)

@@ -68,7 +68,7 @@ public enum EnvelopeContract {
         - Work only in `\(worktree)`. Don't read or write any other checkout.
         - Build and test only with this destination and DerivedData path:
           `\(build)`
-        - Use only the simulator with UDID `\(udid)`. Don't boot, erase or install on any other simulator.
+        - Your simulator's UDID is `\(udid)`. Boot, install and launch there and nowhere else.
         - Put temporary files only under `$TMPDIR`, which is `\(tmp)`. Delete what you create.
         - Your disk budget is \(Bytes.format(quota)). If a write fails for lack of space, stop and report it. Don't delete anything outside your envelope to make room.
         - A green build is not verification. After launching the app, run `\(check)` and confirm CFBundleVersion is `\(o.buildStamp)` before you report success.
@@ -81,13 +81,17 @@ public enum EnvelopeContract {
     ///
     /// `rm -rf` is only ever emitted for a path strictly inside this agent's
     /// own dedicated volume, or strictly inside `agentsRoot` (say,
-    /// `~/agents`) when you keep envelopes in folders. Anything else, however
-    /// it's spelled, is refused rather than guessed at.
+    /// `~/agents`) when you keep envelopes in folders, and never for a path
+    /// that overlaps `repo`. Anything else, however it's spelled, is refused
+    /// rather than guessed at. The volume is deleted by its mount point; see
+    /// `ScratchVolume.mountPoint` for the name-collision caveat.
     public static func teardownCommands(for e: ExecutionEnvelope, repo: EnvelopePath, agentsRoot: EnvelopePath? = nil) throws -> [String] {
         var commands: [String] = []
         if e.teardown.contains(.simulator), let udid = e.simulator.udid {
-            guard e.simulator.hasValidUDID else { throw ContractError(reason: .invalidSimulatorUDID(udid)) }
-            commands.append("xcrun simctl delete \(shellQuote(udid))")
+            guard let canonical = e.simulator.normalizedUDID else { throw ContractError(reason: .invalidSimulatorUDID(udid)) }
+            // A booted simulator can't be deleted, and it usually is still booted here.
+            commands.append("xcrun simctl shutdown \(shellQuote(canonical)) 2>/dev/null || true")
+            commands.append("xcrun simctl delete \(shellQuote(canonical))")
         }
         if e.teardown.contains(.worktree), let worktree = e.worktree {
             commands.append("git -C \(shellQuote(repo)) worktree remove --force \(shellQuote(worktree))")
@@ -98,7 +102,7 @@ public enum EnvelopeContract {
             guard e.teardown.contains(flag), let path else { continue }
             if e.teardown.contains(.worktree), e.isInsideWorktree(path) { continue }
             if volumeGoes, let mount = ownMount, mount.contains(path) { continue }
-            guard isSafeToDelete(path, ownMount: ownMount, agentsRoot: agentsRoot) else {
+            guard !path.overlaps(repo), isSafeToDelete(path, ownMount: ownMount, agentsRoot: agentsRoot) else {
                 throw ContractError(reason: .unsafeDelete(path.description))
             }
             commands.append("rm -rf \(shellQuote(path))")
@@ -136,46 +140,58 @@ public enum EnvelopeContract {
 
     /// A `/Volumes/<name>` mount an agent may own: not one of macOS's own volumes.
     static func isDeletableVolume(_ mount: EnvelopePath) -> Bool {
-        guard mount.components.count == 2, mount.components.first == "Volumes", let name = mount.components.last else { return false }
-        return !systemVolumeNames.contains(name.lowercased())
+        let c = lowercased(mount)
+        guard c.count == 2, c.first == "volumes", let name = c.last else { return false }
+        return !systemVolumeNames.contains(name)
     }
 
-    /// Top-level folders an agents root may never be inside.
+    /// Top-level folders an agents root may never be inside (lower-cased:
+    /// the default APFS volume is case-insensitive, so `/library` is `/Library`).
     private static let systemTopLevel: Set<String> = [
-        "System", "Library", "Applications", "private", "usr", "bin", "sbin", "etc", "var", "tmp", "opt", "cores", "dev",
+        "system", "library", "applications", "private", "usr", "bin", "sbin", "etc", "var", "tmp", "opt", "cores", "dev", "volumes", "users",
     ]
 
     /// Folders in a home directory that hold the user's own things.
     private static let personalFolders: Set<String> = [
-        "Library", "Documents", "Desktop", "Downloads", "Movies", "Music", "Pictures", "Public",
+        "library", "documents", "desktop", "downloads", "movies", "music", "pictures", "public", "applications",
     ]
 
     /// An allow list: strictly inside this agent's own volume, or strictly
     /// inside a sane agents root. `~` and `/Users/<you>` are different roots
     /// here, so a path spelled the other way is refused, not guessed at.
     static func isSafeToDelete(_ path: EnvelopePath, ownMount: EnvelopePath?, agentsRoot: EnvelopePath?) -> Bool {
-        if let mount = ownMount, mount.contains(path), path != mount { return true }
+        if let mount = ownMount, isDeletableVolume(mount), mount.contains(path), path != mount { return true }
         guard let root = agentsRoot, isSaneAgentsRoot(root), root.contains(path), path != root else { return false }
         return true
     }
 
-    /// Somewhere a lead would deliberately keep agent folders: under a home
-    /// directory but not in its Library or personal folders, or on a
-    /// non-system volume. Never `/`, `~`, `/Users/<you>`, or a system folder.
+    /// Somewhere a lead would deliberately keep agent folders: a folder under
+    /// a home directory that isn't hidden, the Library or a personal folder,
+    /// or a folder on a non-system volume (never the volume itself). Never
+    /// `/`, `~`, `/Users/<you>` or a system folder. Compared case-insensitively.
     static func isSaneAgentsRoot(_ root: EnvelopePath) -> Bool {
-        let c = root.components
+        let c = lowercased(root)
         guard c.count >= 2, let first = c.first else { return false }
         switch first {
         case "~":
-            return !personalFolders.contains(c[1])
-        case "Users":
+            return isOrdinaryFolder(c[1])
+        case "users":
             guard c.count >= 3 else { return false }
-            return !personalFolders.contains(c[2])
-        case "Volumes":
-            return !systemVolumeNames.contains(c[1].lowercased())
+            return isOrdinaryFolder(c[2])
+        case "volumes":
+            guard c.count >= 3 else { return false }
+            return !systemVolumeNames.contains(c[1]) && !c[2].hasPrefix(".")
         default:
-            return !systemTopLevel.contains(first)
+            return !systemTopLevel.contains(first) && !first.hasPrefix(".")
         }
+    }
+
+    private static func isOrdinaryFolder(_ name: String) -> Bool {
+        !name.hasPrefix(".") && !personalFolders.contains(name)
+    }
+
+    private static func lowercased(_ path: EnvelopePath) -> [String] {
+        path.components.map { $0.lowercased() }
     }
 
     /// Single-quotes for the shell. A leading `~` becomes `"$HOME"` so it still expands.

@@ -272,7 +272,7 @@ struct VerifyView: View {
 
     private var caption: String {
         switch replay {
-        case .greenBuildsOnly: return "Both builds succeed and both agents report green. Nobody launches the app and reads what is installed."
+        case .greenBuildsOnly: return "Two green builds, and neither agent launches the app to check which build is installed."
         case .sharedSimulator: return "Stamped 111 and 222, both installed on the one booted simulator, then each agent reads the installed build."
         case .defaultStamps: return "Same, but nobody stamped the builds: every worktree builds version 1, so the read-back proves nothing."
         case .envelope: return "Each agent builds with its own stamp and installs on its own simulator."

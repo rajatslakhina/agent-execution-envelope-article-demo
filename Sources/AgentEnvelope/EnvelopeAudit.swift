@@ -152,9 +152,10 @@ public enum EnvelopeAudit {
                     "\(e.agent)'s simulator \"\(udid)\" isn't a UUID. `simctl` treats words like \"booted\" or \"all\" as every matching simulator, not this agent's.")
             }
         }
+        // Grouped by canonical UDID, so the same simulator in two letter cases is one simulator.
         var byUDID: [String: [AgentID]] = [:]
         for e in envelopes {
-            if let udid = e.simulator.udid { byUDID[udid, default: []].append(e.agent) }
+            if let udid = e.simulator.udid { byUDID[UDID.key(udid), default: []].append(e.agent) }
         }
         for udid in byUDID.keys.sorted() {
             guard let agents = byUDID[udid], agents.count > 1 else { continue }
@@ -265,7 +266,7 @@ public enum EnvelopeAudit {
             add(.quotaOvercommit, .capacity, agents, [],
                 "Volume quotas add up to \(Bytes.format(totalQuota)), but only \(Bytes.format(host.headroomBytes)) is free above the floor. A quota is a cap, not a reservation.")
         }
-        let dedicatedSims = Set(envelopes.compactMap(\.simulator.udid))
+        let dedicatedSims = Set(envelopes.compactMap { $0.simulator.udid.map(UDID.key) })
         let booted = dedicatedSims.count + (onBooted.isEmpty ? 0 : 1)
         if booted > host.maxBootedSimulators {
             add(.simulatorBudget, .capacity, envelopes.map(\.agent), [],

@@ -114,7 +114,7 @@ public enum Sample {
     public static let bundleID = "com.example.WeatherApp"
 
     public enum Replay: String, CaseIterable, Sendable, Identifiable {
-        /// Both agents report green and nobody reads back what is installed.
+        /// Two green builds; neither agent checks which build is installed.
         case greenBuildsOnly
         /// Stamped 111 and 222, one booted simulator, both read the installed build.
         case sharedSimulator

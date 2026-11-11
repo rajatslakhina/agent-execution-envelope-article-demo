@@ -150,6 +150,17 @@ final class EnvelopeAuditTests: XCTestCase {
         XCTAssertFalse(report.owned["a"]?.contains(.simulator) ?? true)
     }
 
+    func testSameSimulatorInDifferentLetterCaseIsStillShared() {
+        let udid = TestUDID.make(7).replacingOccurrences(of: "0000-4000", with: "ABCD-4000")
+        let envelopes = [
+            ExecutionEnvelope(agent: "a", worktree: EnvelopePath("/w/a"), simulator: .dedicated(udid: udid)),
+            ExecutionEnvelope(agent: "b", worktree: EnvelopePath("/w/b"), simulator: .dedicated(udid: udid.lowercased())),
+        ]
+        let report = EnvelopeAudit.run(envelopes, on: Sample.host)
+        XCTAssertEqual(report.findings.filter { $0.kind == .sharedSimulator }.first?.agents, ["a", "b"])
+        XCTAssertFalse(report.findings.contains { $0.kind == .simulatorBudget })
+    }
+
     func testNonUUIDSimulatorIsRejected() {
         let e = ExecutionEnvelope(agent: "a", worktree: EnvelopePath("/w/a"), simulator: .dedicated(udid: "all"), teardown: [.worktree, .simulator])
         let report = EnvelopeAudit.run([e], on: Sample.host)
