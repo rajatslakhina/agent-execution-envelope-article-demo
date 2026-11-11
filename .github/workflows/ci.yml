@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'Demo/Screenshots/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  library:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift build (warnings as errors)
+        run: swift build -Xswiftc -warnings-as-errors
+      - name: swift test
+        run: swift test
+
+  demo-on-simulator:
+    runs-on: macos-15
+    needs: library
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, verify the installed stamp, launch and screenshot on its own simulator
+        run: bash Scripts/simulator-screenshots.sh
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator-screenshots
+          path: Demo/Screenshots/*.png
