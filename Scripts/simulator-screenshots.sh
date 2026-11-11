@@ -24,6 +24,7 @@ mkdir -p "$OUT"
 
 UDID="${SIM_UDID:-}"
 CREATED=0
+PREVIOUS_APPEARANCE=""
 cleanup() {
   rm -rf "$TMP_ROOT"
   if [ "${KEEP_BUILD:-0}" != 1 ]; then
@@ -32,6 +33,12 @@ cleanup() {
   if [ "$CREATED" = 1 ] && [ "${KEEP_SIM:-0}" != 1 ]; then
     xcrun simctl shutdown "$UDID" >/dev/null 2>&1 || true
     xcrun simctl delete "$UDID" >/dev/null 2>&1 || true
+  elif [ -n "$UDID" ]; then
+    # A simulator you passed in: put back what this script changed on it.
+    xcrun simctl status_bar "$UDID" clear >/dev/null 2>&1 || true
+    if [ -n "$PREVIOUS_APPEARANCE" ]; then
+      xcrun simctl ui "$UDID" appearance "$PREVIOUS_APPEARANCE" >/dev/null 2>&1 || true
+    fi
   fi
 }
 trap cleanup EXIT
@@ -65,6 +72,7 @@ echo "Using simulator $UDID"
 
 xcrun simctl boot "$UDID" 2>/dev/null || true
 xcrun simctl bootstatus "$UDID" -b
+PREVIOUS_APPEARANCE="$(xcrun simctl ui "$UDID" appearance 2>/dev/null | grep -E '^(light|dark)$' || true)"
 xcrun simctl ui "$UDID" appearance light || true
 
 # Build for the generic simulator platform, then install on this run's own device.

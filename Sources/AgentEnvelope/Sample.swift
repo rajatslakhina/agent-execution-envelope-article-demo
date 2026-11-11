@@ -2,8 +2,8 @@ import Foundation
 
 /// A constructed scenario: four agents on one Mac with Time Machine on. The
 /// 5.7 GB fixture and the 500-600 GB free-space buffer come from Fatbobman's
-/// Swift Weekly #160. The run cadence, the 50 GB floor, the quotas and the
-/// UDIDs are made up for the demo.
+/// Swift Weekly #160. The run cadence (QA every 15 minutes), the task size
+/// (four runs), the 50 GB floor, the quotas and the UDIDs are made up for the demo.
 public enum Sample {
     public static let agents: [AgentID] = ["agent-1", "agent-2", "agent-3", "agent-4"]
 
@@ -19,8 +19,9 @@ public enum Sample {
     public static let bootedUDID = "B007ED00-0000-4000-8000-000000000000"
 
     /// A fake but well-formed UDID per agent: agent-1 gets 11111111-..., and so on.
+    /// Any `Int` works, including negative and extreme values.
     public static func udid(for index: Int) -> String {
-        let d = String((index + 1) % 10)
+        let d = String((index % 10 + 11) % 10)
         let block = { (n: Int) in String(repeating: d, count: n) }
         return "\(block(8))-\(block(4))-4\(block(3))-8\(block(3))-\(block(12))"
     }

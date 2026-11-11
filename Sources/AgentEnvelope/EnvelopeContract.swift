@@ -32,7 +32,8 @@ public struct ContractOptions: Hashable, Sendable {
 
 /// Renders the envelope into the two places it has to live: the agent's
 /// instructions (an AGENTS.md section) and the harness's teardown. Both come
-/// from the same value the audit checks, so they can't drift apart.
+/// from the same value the audit checks, so the instructions can't name a
+/// path or simulator the audit hasn't seen.
 public enum EnvelopeContract {
     /// Fields the agent's instructions must name. Teardown isn't one of them:
     /// the harness runs it, not the agent.
@@ -52,7 +53,7 @@ public enum EnvelopeContract {
     public static func agentsSection(for e: ExecutionEnvelope, options o: ContractOptions) throws -> String {
         let missing = unboundFields(e)
         guard missing.isEmpty,
-              let worktree = e.worktree, let dd = e.derivedData, let udid = e.simulator.udid,
+              let worktree = e.worktree, let dd = e.derivedData, let udid = e.simulator.normalizedUDID,
               let tmp = e.tempRoot, let quota = e.scratch.quotaBytes else {
             throw ContractError(reason: .unbound(missing))
         }
@@ -102,7 +103,7 @@ public enum EnvelopeContract {
             guard e.teardown.contains(flag), let path else { continue }
             if e.teardown.contains(.worktree), e.isInsideWorktree(path) { continue }
             if volumeGoes, let mount = ownMount, mount.contains(path) { continue }
-            guard !path.overlaps(repo), isSafeToDelete(path, ownMount: ownMount, agentsRoot: agentsRoot) else {
+            guard !mayOverlap(path, repo), isSafeToDelete(path, ownMount: ownMount, agentsRoot: agentsRoot) else {
                 throw ContractError(reason: .unsafeDelete(path.description))
             }
             commands.append("rm -rf \(shellQuote(path))")
@@ -160,9 +161,18 @@ public enum EnvelopeContract {
     /// inside a sane agents root. `~` and `/Users/<you>` are different roots
     /// here, so a path spelled the other way is refused, not guessed at.
     static func isSafeToDelete(_ path: EnvelopePath, ownMount: EnvelopePath?, agentsRoot: EnvelopePath?) -> Bool {
-        if let mount = ownMount, isDeletableVolume(mount), mount.contains(path), path != mount { return true }
-        guard let root = agentsRoot, isSaneAgentsRoot(root), root.contains(path), path != root else { return false }
+        if let mount = ownMount, isDeletableVolume(mount), mount.contains(path), !path.isSame(as: mount) { return true }
+        guard let root = agentsRoot, isSaneAgentsRoot(root), root.contains(path), !path.isSame(as: root) else { return false }
         return true
+    }
+
+    /// Whether two paths could be the same place or nest, ignoring letter
+    /// case. A `~` path and a `/Users/...` path can't be compared without
+    /// knowing the home directory, so they count as overlapping.
+    static func mayOverlap(_ a: EnvelopePath, _ b: EnvelopePath) -> Bool {
+        let x = lowercased(a), y = lowercased(b)
+        if (x.first == "~" && y.first == "users") || (x.first == "users" && y.first == "~") { return true }
+        return x.starts(with: y) || y.starts(with: x)
     }
 
     /// Somewhere a lead would deliberately keep agent folders: a folder under

@@ -42,6 +42,9 @@ public enum Verdict: Hashable, Sendable {
     case notChecked
     /// The check ran on a different simulator from the one the build went to.
     case wrongSimulator(expected: String, actual: String)
+    /// The receipt doesn't name a real simulator (say, `"booted"`), so there
+    /// is no way to know which device was checked.
+    case unidentifiedSimulator(String)
     /// The installed app is another build. `installedBy` is the agent whose
     /// receipt matches it, when exactly one does.
     case foreignBuild(installedBy: AgentID?)
@@ -62,6 +65,7 @@ public enum Verdict: Hashable, Sendable {
         case .verified: return "Verified"
         case .notChecked: return "Not checked"
         case .wrongSimulator: return "Wrong simulator"
+        case .unidentifiedSimulator: return "No simulator UDID"
         case .foreignBuild(let by): return by.map { "Tested \($0)'s build" } ?? "Tested someone else's build"
         case .ambiguousStamp(let others): return "Ambiguous: same stamp as \(others.map(\.rawValue).joined(separator: ", "))"
         case .sharedSimulator(let others): return "Shared simulator with \(others.map(\.rawValue).joined(separator: ", "))"
@@ -84,6 +88,10 @@ public enum ProvenanceGate {
         for (agent, receipt) in lastReceipt {
             guard let check = lastCheck[agent] else {
                 out[agent] = .notChecked
+                continue
+            }
+            guard UDID.normalized(receipt.simulatorUDID) != nil else {
+                out[agent] = .unidentifiedSimulator(receipt.simulatorUDID)
                 continue
             }
             // simctl accepts a UDID in either case, so compare canonical forms.

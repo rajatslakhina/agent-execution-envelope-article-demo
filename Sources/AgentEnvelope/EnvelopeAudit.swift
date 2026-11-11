@@ -123,7 +123,7 @@ public enum EnvelopeAudit {
         // Worktree
         let inSharedCheckout = envelopes.filter { $0.worktree == nil }.map(\.agent)
         if !inSharedCheckout.isEmpty {
-            add(.sharedCheckout, .collision, inSharedCheckout, [.worktree],
+            add(.sharedCheckout, .collision, inSharedCheckout, [.worktree, .teardown],
                 "\(list(inSharedCheckout)) \(inSharedCheckout.count == 1 ? "works" : "work") in the shared checkout, where another session (or you) can change files mid-task.")
         }
 
@@ -143,7 +143,7 @@ public enum EnvelopeAudit {
         // Simulator
         let onBooted = envelopes.filter { $0.simulator == .whateverIsBooted }.map(\.agent)
         if !onBooted.isEmpty {
-            add(.sharedSimulator, .collision, onBooted, [.simulator],
+            add(.sharedSimulator, .collision, onBooted, [.simulator, .teardown],
                 "\(list(onBooted)) \(onBooted.count == 1 ? "installs" : "install") on whatever simulator is booted. The last install wins, so an agent can launch, and \"verify\", a build it didn't make.")
         }
         for e in envelopes {
@@ -218,16 +218,16 @@ public enum EnvelopeAudit {
         for e in envelopes {
             switch e.scratch {
             case .system:
-                add(.noQuota, .capacity, [e.agent], [.scratchVolume],
+                add(.noQuota, .capacity, [e.agent], [.scratchVolume, .teardown],
                     "\(e.agent)'s scratch is on the Data volume with no cap: one runaway script can fill the disk for every agent and for macOS.")
                 if host.timeMachineSnapshots {
                     add(.snapshotRetention, .capacity, [e.agent], [.scratchVolume],
                         "\(e.agent)'s scratch is inside Time Machine's hourly local snapshots. A snapshot covers the whole volume and can be kept for up to a day, so a deleted file's space only comes back when the snapshot holding it is removed.")
                 }
             case .dedicated(let name, let quota, let inTimeMachine):
-                guard let mount = e.scratch.mountPoint else {
+                guard let mount = e.scratch.mountPoint, EnvelopeContract.isDeletableVolume(mount) else {
                     add(.invalidVolumeName, .capacity, [e.agent], [.scratchVolume],
-                        "\(e.agent)'s volume name \"\(name)\" can't be a mount point under /Volumes, so nothing can be placed on it.")
+                        "\(e.agent)'s volume name \"\(name)\" is one of macOS's own volumes or can't be a mount point under /Volumes, so it can't be an agent's scratch volume.")
                     continue
                 }
                 volumeUsers[name, default: []].append(e.agent)

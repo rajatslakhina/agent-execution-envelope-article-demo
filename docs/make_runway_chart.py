@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Draws the article's disk-runway chart from DiskRunway's own trace.
 
-    RUNWAY_TRACE_OUT=$PWD/docs/runway-trace.json swift test --filter testExportRunwayTraceWhenAsked
+    RUNWAY_TRACE_OUT=$PWD/docs/runway-trace.json swift test --filter testRunwayTraceMatchesTheCommittedChartData
     python3 docs/make_runway_chart.py docs/runway-trace.json docs/runway.svg
 
 The SVG is what the article's PNG was rendered from (headless Chromium, 2x).

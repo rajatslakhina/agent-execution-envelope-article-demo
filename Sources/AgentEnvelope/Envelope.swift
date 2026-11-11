@@ -94,8 +94,9 @@ public enum ScratchVolume: Hashable, Sendable {
     ///
     /// This assumes the name is free. If a stale volume already has it, macOS
     /// mounts the new one as `/Volumes/<name> 1`, so a harness should check
-    /// the mount point (or keep the UUID `addVolume` prints) before handing
-    /// the envelope to an agent.
+    /// the mount point (or keep the disk identifier `addVolume` prints;
+    /// `diskutil info <id>` gives its volume UUID) before handing the
+    /// envelope to an agent.
     public var mountPoint: EnvelopePath? {
         guard case .dedicated(let name, _, _) = self else { return nil }
         return EnvelopePath("/Volumes")?.appending(name)

@@ -295,7 +295,7 @@ struct ContractView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("Generated from the same envelope the audit checks, so the instructions and the harness can't drift apart.")
+                    Text("Rendered from the same envelope the audit checks, so the instructions can't name a path or simulator the audit hasn't seen.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     block(title: "AGENTS.md", text: section)

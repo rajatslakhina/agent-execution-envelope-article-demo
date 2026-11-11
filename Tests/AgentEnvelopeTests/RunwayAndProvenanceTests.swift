@@ -162,17 +162,25 @@ final class ProvenanceGateTests: XCTestCase {
     }
 
     func testCheckOnAnotherSimulatorIsRejected() {
-        let receipt = BuildReceipt(agent: "a", bundleID: "x", stamp: "7", simulatorUDID: "S1")
-        let check = LaunchCheck(agent: "a", simulatorUDID: "S2", bundleID: "x", installedStamp: "7")
+        let s1 = TestUDID.make(1), s2 = TestUDID.make(2)
+        let receipt = BuildReceipt(agent: "a", bundleID: "x", stamp: "7", simulatorUDID: s1)
+        let check = LaunchCheck(agent: "a", simulatorUDID: s2, bundleID: "x", installedStamp: "7")
         XCTAssertEqual(ProvenanceGate.verdicts(receipts: [receipt], checks: [check])["a"],
-                       .wrongSimulator(expected: "S1", actual: "S2"))
+                       .wrongSimulator(expected: s1, actual: s2))
+    }
+
+    func testAReceiptWithoutARealUDIDNeverVerifies() {
+        let receipt = BuildReceipt(agent: "a", bundleID: "x", stamp: "7", simulatorUDID: "booted")
+        let check = LaunchCheck(agent: "a", simulatorUDID: "booted", bundleID: "x", installedStamp: "7")
+        XCTAssertEqual(ProvenanceGate.verdicts(receipts: [receipt], checks: [check])["a"], .unidentifiedSimulator("booted"))
     }
 
     func testLastReceiptAndLastCheckWin() {
-        let receipts = [BuildReceipt(agent: "a", bundleID: "x", stamp: "100", simulatorUDID: "S"),
-                        BuildReceipt(agent: "a", bundleID: "x", stamp: "111", simulatorUDID: "S")]
-        let checks = [LaunchCheck(agent: "a", simulatorUDID: "S", bundleID: "x", installedStamp: "100"),
-                      LaunchCheck(agent: "a", simulatorUDID: "S", bundleID: "x", installedStamp: "111")]
+        let sim = TestUDID.make(3)
+        let receipts = [BuildReceipt(agent: "a", bundleID: "x", stamp: "100", simulatorUDID: sim),
+                        BuildReceipt(agent: "a", bundleID: "x", stamp: "111", simulatorUDID: sim)]
+        let checks = [LaunchCheck(agent: "a", simulatorUDID: sim, bundleID: "x", installedStamp: "100"),
+                      LaunchCheck(agent: "a", simulatorUDID: sim, bundleID: "x", installedStamp: "111")]
         XCTAssertEqual(ProvenanceGate.verdicts(receipts: receipts, checks: checks)["a"], .verified)
     }
 
@@ -188,8 +196,9 @@ final class ProvenanceGateTests: XCTestCase {
     }
 
     func testUnknownInstalledBuildHasNoOwner() {
-        let receipt = BuildReceipt(agent: "a", bundleID: "x", stamp: "7", simulatorUDID: "S")
-        let check = LaunchCheck(agent: "a", simulatorUDID: "S", bundleID: "x", installedStamp: "999")
+        let sim = TestUDID.make(4)
+        let receipt = BuildReceipt(agent: "a", bundleID: "x", stamp: "7", simulatorUDID: sim)
+        let check = LaunchCheck(agent: "a", simulatorUDID: sim, bundleID: "x", installedStamp: "999")
         XCTAssertEqual(ProvenanceGate.verdicts(receipts: [receipt], checks: [check])["a"], .foreignBuild(installedBy: nil))
     }
 }
@@ -222,6 +231,16 @@ final class EnvelopeContractTests: XCTestCase {
         XCTAssertThrowsError(try EnvelopeContract.agentsSection(for: bad, options: Sample.contractOptions)) { error in
             XCTAssertEqual(error as? ContractError, ContractError(reason: .unbound([.simulator])))
         }
+    }
+
+    func testInstructionsAndTeardownUseTheSameCanonicalUDID() throws {
+        var e = try envelope(0)
+        e.simulator = .dedicated(udid: "abcdef00-1111-4111-8111-111111111111")
+        let text = try EnvelopeContract.agentsSection(for: e, options: Sample.contractOptions)
+        XCTAssertTrue(text.contains("ABCDEF00-1111-4111-8111-111111111111"))
+        XCTAssertFalse(text.contains("abcdef00"))
+        let teardown = try EnvelopeContract.teardownCommands(for: e, repo: Sample.repo)
+        XCTAssertTrue(teardown.contains("xcrun simctl delete 'ABCDEF00-1111-4111-8111-111111111111'"))
     }
 
     func testTeardownDeletesTheWholeVolume() throws {
@@ -282,6 +301,14 @@ final class EnvelopeContractTests: XCTestCase {
         }
         let sibling = ExecutionEnvelope(agent: "a", tempRoot: EnvelopePath("~/src/agent-a-tmp"), teardown: [.tempRoot])
         XCTAssertEqual(try EnvelopeContract.teardownCommands(for: sibling, repo: Sample.repo, agentsRoot: root), ["rm -rf \"$HOME\"'/src/agent-a-tmp'"])
+        // Neither letter case nor spelling the home directory differently gets past the repo guard.
+        let otherCase = ExecutionEnvelope(agent: "a", tempRoot: EnvelopePath("~/src/app"), teardown: [.tempRoot])
+        XCTAssertThrowsError(try EnvelopeContract.teardownCommands(for: otherCase, repo: Sample.repo, agentsRoot: root))
+        let otherSpelling = ExecutionEnvelope(agent: "a", tempRoot: EnvelopePath("/Users/me/src/App"), teardown: [.tempRoot])
+        XCTAssertThrowsError(try EnvelopeContract.teardownCommands(for: otherSpelling, repo: Sample.repo, agentsRoot: EnvelopePath("/Users/me/src")))
+        // Nor can a path delete the agents root itself by changing case.
+        let rootItself = ExecutionEnvelope(agent: "a", tempRoot: EnvelopePath("~/AGENTS"), teardown: [.tempRoot])
+        XCTAssertThrowsError(try EnvelopeContract.teardownCommands(for: rootItself, repo: Sample.repo, agentsRoot: EnvelopePath("~/agents")))
     }
 
     func testAllowsDeletesInsideTheAgentsRoot() throws {

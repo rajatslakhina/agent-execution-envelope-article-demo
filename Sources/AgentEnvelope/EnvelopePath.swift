@@ -6,6 +6,9 @@ import Foundation
 /// Two roots are supported: `/` and `~` (the user's home). They are kept apart
 /// on purpose: `~/x` and `/Users/me/x` may be the same folder on disk, so write
 /// every envelope in the same style if you want overlaps between them caught.
+///
+/// `contains`, `overlaps` and `isSame(as:)` ignore letter case, like the
+/// default (case-insensitive) APFS volume. `==` is exact spelling.
 public struct EnvelopePath: Hashable, Sendable, Comparable, CustomStringConvertible {
     /// Path components after the root. The first component is `"~"` for
     /// home-relative paths.
@@ -13,8 +16,9 @@ public struct EnvelopePath: Hashable, Sendable, Comparable, CustomStringConverti
 
     /// Parses `"/abs/path"` or `"~/relative-to-home"`.
     ///
-    /// Returns `nil` for an empty or relative path, or for one whose `..`
-    /// segments would climb above its root.
+    /// Returns `nil` for an empty or relative path, for one whose `..`
+    /// segments would climb above its root, and for `/~/...`, which would
+    /// otherwise read as the home directory.
     public init?(_ raw: String) {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         var parts: [String]
@@ -40,6 +44,7 @@ public struct EnvelopePath: Hashable, Sendable, Comparable, CustomStringConverti
                 parts.append(String(piece))
             }
         }
+        if rootDepth == 0, parts.first == "~" { return nil }
         components = parts
     }
 
@@ -54,8 +59,15 @@ public struct EnvelopePath: Hashable, Sendable, Comparable, CustomStringConverti
 
     /// True when `other` is this path or lives somewhere below it.
     public func contains(_ other: EnvelopePath) -> Bool {
-        other.components.starts(with: components)
+        other.folded.starts(with: folded)
     }
+
+    /// The same location, ignoring letter case.
+    public func isSame(as other: EnvelopePath) -> Bool {
+        folded == other.folded
+    }
+
+    private var folded: [String] { components.map { $0.lowercased() } }
 
     /// True when either path contains the other: writing to one can change
     /// what is under the other.
@@ -67,6 +79,7 @@ public struct EnvelopePath: Hashable, Sendable, Comparable, CustomStringConverti
     /// rejected so a child can never escape its parent.
     public func appending(_ name: String) -> EnvelopePath? {
         guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else { return nil }
+        if components.isEmpty, name == "~" { return nil }
         return EnvelopePath(components: components + [name])
     }
 

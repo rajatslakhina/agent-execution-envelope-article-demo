@@ -22,6 +22,17 @@ final class EnvelopePathTests: XCTestCase {
         XCTAssertNil(EnvelopePath("/.."))
         XCTAssertNil(EnvelopePath("~/.."))
         XCTAssertNil(EnvelopePath("~other/x"))
+        XCTAssertNil(EnvelopePath("/~/x"), "would read as the home directory")
+        XCTAssertNil(EnvelopePath("/a/../~/x"))
+        XCTAssertNil(EnvelopePath.root.appending("~"))
+    }
+
+    func testContainmentIgnoresLetterCaseLikeAPFS() throws {
+        let a = try XCTUnwrap(EnvelopePath("/Volumes/Scratch/tmp"))
+        let b = try XCTUnwrap(EnvelopePath("/Volumes/scratch/TMP"))
+        XCTAssertTrue(a.overlaps(b))
+        XCTAssertTrue(a.isSame(as: b))
+        XCTAssertNotEqual(a, b, "== is exact spelling")
     }
 
     func testComparesByComponentNotByStringPrefix() throws {
@@ -54,6 +65,10 @@ final class EnvelopePathTests: XCTestCase {
         }
         XCTAssertNotEqual(Sample.repo, .root)
         XCTAssertNotNil(UUID(uuidString: Sample.bootedUDID))
+        for index in [Int.max, Int.min, -1, 0, 9, 10] {
+            XCTAssertNotNil(UUID(uuidString: Sample.udid(for: index)), "\(index)")
+        }
+        XCTAssertEqual(Sample.udid(for: 0), "11111111-1111-4111-8111-111111111111")
     }
 
     func testBytesNeverTrapsAndNeverRoundsAMinimumUp() {
@@ -117,6 +132,25 @@ final class EnvelopeAuditTests: XCTestCase {
         let report = EnvelopeAudit.run(kept, on: Sample.host)
         XCTAssertEqual(report.findings.filter { $0.kind == .survivesTeardown(.scratchVolume) }.count, 4)
         XCTAssertEqual(report.owned["agent-1"], [.worktree, .derivedData, .simulator, .tempRoot])
+    }
+
+    func testFallingBackToASharedDefaultCostsTeardown() {
+        let booted = ExecutionEnvelope(
+            agent: "a", worktree: EnvelopePath("/w/a"), derivedData: EnvelopePath("/w/a/.build/dd"),
+            tempRoot: EnvelopePath("/w/a/tmp"), scratch: .dedicated(name: "a", quotaBytes: Bytes.gb(10), inTimeMachine: false),
+            teardown: [.worktree, .scratchVolume]
+        )
+        XCTAssertFalse(EnvelopeAudit.run([booted], on: Sample.host).owned["a"]?.contains(.teardown) ?? true, "booted simulator")
+        var checkout = booted
+        checkout.worktree = nil
+        checkout.simulator = .dedicated(udid: TestUDID.make(1))
+        checkout.teardown = .everything
+        XCTAssertFalse(EnvelopeAudit.run([checkout], on: Sample.host).owned["a"]?.contains(.teardown) ?? true, "shared checkout")
+        var dataVolume = booted
+        dataVolume.simulator = .dedicated(udid: TestUDID.make(1))
+        dataVolume.scratch = .system
+        dataVolume.teardown = .everything
+        XCTAssertFalse(EnvelopeAudit.run([dataVolume], on: Sample.host).owned["a"]?.contains(.teardown) ?? true, "Data volume")
     }
 
     func testEveryMissingFieldHasAReason() {
@@ -251,6 +285,17 @@ final class EnvelopeAuditTests: XCTestCase {
     func testVolumeNameThatCannotMountIsFlagged() {
         var e = fullEnvelope(1, quota: 50)
         e.scratch = .dedicated(name: "a/b", quotaBytes: Bytes.gb(50), inTimeMachine: false)
+        let report = EnvelopeAudit.run([e], on: Sample.host)
+        XCTAssertTrue(report.findings.contains { $0.kind == .invalidVolumeName })
+        XCTAssertFalse(report.owned["agent-1"]?.contains(.scratchVolume) ?? true)
+    }
+
+    func testSystemVolumeNameIsNotAScratchVolume() {
+        var e = fullEnvelope(1, quota: 50)
+        e.scratch = .dedicated(name: "Data", quotaBytes: Bytes.gb(50), inTimeMachine: false)
+        e.worktree = EnvelopePath("/Volumes/Data/worktree")
+        e.derivedData = EnvelopePath("/Volumes/Data/dd")
+        e.tempRoot = EnvelopePath("/Volumes/Data/tmp")
         let report = EnvelopeAudit.run([e], on: Sample.host)
         XCTAssertTrue(report.findings.contains { $0.kind == .invalidVolumeName })
         XCTAssertFalse(report.owned["agent-1"]?.contains(.scratchVolume) ?? true)

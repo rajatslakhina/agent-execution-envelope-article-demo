@@ -84,12 +84,12 @@ mkdir -p /Volumes/agent-2/DerivedData /Volumes/agent-2/tmp
 xcrun simctl create agent-2 "iPhone 18 Pro"                # prints the UDID that goes into the envelope
 ```
 
-Check the new volume really mounted at `/Volumes/agent-2`: if a stale volume already had that name, macOS mounts the new one as `/Volumes/agent-2 1`, so keep the UUID `addVolume` prints. Start the agent with `TMPDIR=/Volumes/agent-2/tmp`, and give it the AGENTS.md section `EnvelopeContract` renders. When the task ends, run the teardown it generates. Deleting the volume needs ownership of the disk. The **Contract** tab in the demo shows both.
+Check the new volume really mounted at `/Volumes/agent-2`: if a stale volume already had that name, macOS mounts the new one as `/Volumes/agent-2 1`, so keep the disk identifier `addVolume` prints (`diskutil info <id>` gives its volume UUID). Start the agent with `TMPDIR=/Volumes/agent-2/tmp`, and give it the AGENTS.md section `EnvelopeContract` renders. When the task ends, run the teardown it generates. Deleting the volume needs ownership of the disk. The **Contract** tab in the demo shows both.
 
 ## Run it
 
 1. Clone this repo and open `Demo.xcodeproj`.
-2. Pick the **Demo** scheme and any iOS Simulator.
+2. Pick the **Demo** scheme and any iOS 17 or later Simulator.
 3. Build and run. The app consumes the package through a local package reference, so there's nothing else to set up.
 
 Library only: `swift build` and `swift test`.
@@ -106,12 +106,12 @@ python3 docs/make_runway_chart.py docs/runway-trace.json docs/runway.svg
 ## Verification status
 
 - `swift build -Xswiftc -warnings-as-errors`: clean (macOS 27.2, Xcode 27.2, Swift 6.4.2).
-- `swift test`: 54 tests, 0 failures.
+- `swift test`: 59 tests, 0 failures.
 - iOS Simulator: `Scripts/simulator-screenshots.sh` built the app with `xcodebuild`, installed and launched it on a newly created iPhone 18 Pro simulator (iOS 27.2), confirmed the installed CFBundleVersion matched the build's stamp, launched all five screens by launch argument, confirmed each was still running, took the screenshots in `Demo/Screenshots/`, then deleted the simulator. It used the command line only, with no taps.
 
 ## Notes and limits
 
-- `Sample` is a constructed scenario. The 5.7 GB fixture and the 500-600 GB free-space buffer come from [Fatbobman's Swift Weekly #160](https://fatbobman.com/en/weekly/issue-160/). The run cadence, the 50 GB floor, the quotas and the UDIDs are made up.
+- `Sample` is a constructed scenario. The 5.7 GB fixture and the 500-600 GB free-space buffer come from [Fatbobman's Swift Weekly #160](https://fatbobman.com/en/weekly/issue-160/). The run cadence (QA every 15 minutes), the task size (four runs), the 50 GB floor, the quotas and the UDIDs are made up.
 - `DiskRunway` counts only what runs leave behind. It ignores Time Machine snapshot retention, which is why the envelope puts scratch data on a volume Time Machine doesn't snapshot.
 - Paths under `~` and under `/Users/<you>` are compared as different roots. Write envelopes in one style.
 
